@@ -98,8 +98,56 @@ impl<K: Ord> SetMultiSlot<K> {
     fn shrink_to_fit(&mut self) {
         self.data.shrink_to_fit();
     }
+    fn filtered_iter(&self) -> SetMultiSlotFilterIterator<K> {
+        SetMultiSlotFilterIterator {
+            iter: self.data.iter().enumerate(),
+            flags: &self.flags,
+        }
+    }
 }
 
+struct SetMultiSlotFilterIterator<'t,K> {
+    iter: std::iter::Enumerate<std::slice::Iter<'t,K>>,
+    flags: &'t Flags,
+}
+impl<'t,K> Iterator for SetMultiSlotFilterIterator<'t,K> {
+    type Item = &'t K;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.iter.next() {
+                Some((n,k)) if self.flags.get(n) => break Some(k),
+                Some(_) => continue,
+                None => break None,
+            }
+        }
+    }
+}
+
+pub struct Iter<'t,K> {
+    slot_iter: Option<std::slice::Iter<'t,(K,())>>,
+    cur_data_iter: Option<SetMultiSlotFilterIterator<'t,K>>,
+    data_iter: Vec<SetMultiSlotFilterIterator<'t,K>>,
+}
+impl<'t,K> Iterator for Iter<'t,K> {
+    type Item = &'t K;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(iter) = &mut self.slot_iter {
+            match iter.next() {
+                Some((k,())) => return Some(&k),
+                None => { self.slot_iter = None; },
+            }
+        }
+        while let Some(iter) = &mut self.cur_data_iter {
+            match iter.next() {
+                Some(k) => return Some(k),
+                None => { self.cur_data_iter = self.data_iter.pop(); },
+            }
+        }
+        None
+    }
+}
 
 
 const CURRENT_CIVS_SET_VERSION: (u32,u32) = (0,1);
@@ -193,6 +241,22 @@ impl<K: Ord> CivSet<K> {
             tmp_merge_flags: Flags::tmp(),
         }
     }
+    pub fn filtered_iter(&self) -> Iter<K> {
+        let mut v = {
+            let n = self.data.len();
+            let mut v = Vec::with_capacity(n);            
+            for i in 0 .. n {
+                v.push(self.data[n-i-1].filtered_iter());
+            }
+            v
+        };
+        Iter {
+            slot_iter: Some(self.slot.iter()),
+            cur_data_iter: v.pop(),
+            data_iter: v,            
+        }
+    }
+    
     pub fn clear(&mut self) {
         self.len = 0;
         self.tombs = 0;
@@ -401,5 +465,35 @@ impl<K: Ord> CivSet<K> {
         }
         v.push(format!("TOT: {:12} {:12} {:12}",s.0,s.1,s.2));
         v
+    }
+}
+
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn iterator() {
+        let mut set = CivSet::new();
+        let mut res = Vec::new();
+        for i in 0 .. 1000 {
+            set.insert(i);
+            if i % 2 == 0 {
+                res.push(i);
+            }
+        }
+        for i in 0 .. 1000 {
+            if i % 2 == 1 {
+                set.remove(&i);
+            }
+        }
+
+        let r = {
+            let mut tmp = set.filtered_iter().map(|v|*v).collect::<Vec<_>>();
+            tmp.sort();
+            tmp
+        };
+        assert_eq!(res,r);
     }
 }
